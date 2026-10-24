@@ -1,8 +1,9 @@
 import { describe, expect, it } from "bun:test";
+import { createClient, custom } from "viem";
 import { anvil, mainnet } from "viem/chains";
 
 import { MAINNET_RPC_FALLBACK_URL, RPC_FALLBACK_URLS, RPC_URL } from "../src/constants/config";
-import { getChainRpcUrl, getRpcTransportUrls } from "../src/wallet/config";
+import { dynamicRpcTransport, getChainRpcUrl, getRpcTransportUrls } from "../src/wallet/config";
 
 describe("getChainRpcUrl", () => {
   it("appends the chain id to mainnet RPC endpoints", () => {
@@ -58,5 +59,51 @@ describe("getRpcTransportUrls", () => {
     for (const fallbackUrl of RPC_FALLBACK_URLS) {
       expect(urls).toContain(`${fallbackUrl}/1`);
     }
+  });
+});
+
+describe("dynamicRpcTransport", () => {
+  it("passes unevaluated transport factories to viem fallback and exercises the fallback entry when primary fails", async () => {
+    const calls: string[] = [];
+    const primaryTransport = custom({
+      async request() {
+        calls.push("primary");
+        throw new Error("primary RPC failed");
+      },
+    });
+    const fallbackTransport = custom({
+      async request() {
+        calls.push("fallback");
+        return "0x1";
+      },
+    });
+
+    const client = createClient({
+      chain: mainnet,
+      transport: dynamicRpcTransport(() => [primaryTransport, fallbackTransport]),
+    });
+
+    const result = await client.request({ method: "eth_chainId" });
+    expect(result).toBe("0x1");
+    expect(calls).toEqual(["primary", "fallback"]);
+  });
+
+  it("returns primary transport result directly when no fallback exists", async () => {
+    const calls: string[] = [];
+    const primaryTransport = custom({
+      async request() {
+        calls.push("primary");
+        return "0x1";
+      },
+    });
+
+    const client = createClient({
+      chain: mainnet,
+      transport: dynamicRpcTransport(() => [primaryTransport]),
+    });
+
+    const result = await client.request({ method: "eth_chainId" });
+    expect(result).toBe("0x1");
+    expect(calls).toEqual(["primary"]);
   });
 });

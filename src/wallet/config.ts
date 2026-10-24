@@ -35,22 +35,39 @@ export function getRpcTransportUrls(
   return [...new Set(rpcUrls.map((currentRpcUrl) => getChainRpcUrl(currentRpcUrl, chain.id, localNode)))];
 }
 
-function createRpcTransport(chain: Chain): Transport {
-  const selectedRpcUrl = getResolvedRpcBaseUrl() || RPC_URL;
-  const rpcTransports = getRpcTransportUrls(chain, { rpcUrl: selectedRpcUrl }).map((rpcUrl) =>
-    http(rpcUrl, {
-      batch: !isLocalNode,
-      timeout: RPC_TRANSPORT_TIMEOUT_MS,
-    })
-  );
+function createRpcTransport(rpcUrl: string): Transport {
+  return http(rpcUrl, {
+    batch: !isLocalNode,
+    timeout: RPC_TRANSPORT_TIMEOUT_MS,
+  });
+}
 
-  if (rpcTransports.length === 1) return rpcTransports[0];
-  return fallback(rpcTransports, { rank: false });
+/**
+ * Builds a dynamic RPC transport that supplies unevaluated transport factories
+ * to viem's fallback instead of invoking them prematurely.
+ *
+ * viem's fallback expects transport factories and evaluates them during client creation;
+ * passing already-evaluated instances triggers a TypeError: fn is not a function.
+ *
+ * @param createTransport - Callback producing the array of transport factories for the chain.
+ * @returns A viem Transport function resolving dynamically.
+ */
+export function dynamicRpcTransport(createTransport: () => Transport[]): Transport {
+  const transport: Transport = (params) => {
+    const [primary, ...rest] = createTransport();
+    if (!primary) throw new Error("No RPC transport URL is available");
+    if (rest.length === 0) return primary(params);
+    return fallback([primary, ...rest], { rank: false })(params);
+  };
+
+  return transport;
 }
 
 // Anvil doesn't support URLs like http://localhost:8545/31337
 const transports = supportedChains.reduce<TransportsMap>((acc, chain) => {
-  acc[chain.id] = createRpcTransport(chain);
+  acc[chain.id] = dynamicRpcTransport(() =>
+    getRpcTransportUrls(chain, { rpcUrl: getResolvedRpcBaseUrl() || RPC_URL }).map((rpcUrl) => createRpcTransport(rpcUrl))
+  );
   return acc;
 }, {} as TransportsMap);
 
