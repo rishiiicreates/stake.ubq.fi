@@ -1,5 +1,5 @@
 import { mainnet, anvil, type Chain } from "viem/chains";
-import { fallback } from "viem";
+import { createTransport, fallback } from "viem";
 import { createConfig, http, injected, type Transport } from "wagmi";
 import { getChainRpcUrl, isLocalNode, RPC_FALLBACK_URLS, RPC_URL } from "../constants/config";
 import { getResolvedRpcBaseUrl } from "../utils/rpc-runtime";
@@ -51,27 +51,24 @@ function createRpcTransport(rpcUrl: string): Transport {
  * @param createTransport - Callback producing the array of transport factories for the chain.
  * @returns A viem Transport function with per-request dynamic resolution.
  */
-export function dynamicRpcTransport(createTransport: () => Transport[]): Transport {
+export function dynamicRpcTransport(createTransportFactory: () => Transport[]): Transport {
   return (params) => {
-    return {
-      config: {
-        key: "dynamicRpc",
-        name: "Dynamic RPC",
-        request: undefined as never,
-        retryCount: 3,
-        retryDelay: 150,
-        timeout: RPC_TRANSPORT_TIMEOUT_MS,
-        type: "dynamicRpc",
-      },
+    return createTransport({
+      key: "dynamicRpc",
+      name: "Dynamic RPC",
       async request(args) {
-        const transports = createTransport();
+        const transports = createTransportFactory();
         const [primary, ...rest] = transports;
         if (!primary) throw new Error("No RPC transport URL is available");
-        const activeTransport = rest.length === 0 ? primary(params) : fallback([primary, ...rest], { rank: false })(params);
+        const activeTransport =
+          rest.length === 0 ? primary(params) : fallback([primary, ...rest], { rank: false })(params);
         return activeTransport.request(args);
       },
-      value: undefined,
-    };
+      retryCount: 3,
+      retryDelay: 150,
+      timeout: RPC_TRANSPORT_TIMEOUT_MS,
+      type: "dynamicRpc",
+    });
   };
 }
 

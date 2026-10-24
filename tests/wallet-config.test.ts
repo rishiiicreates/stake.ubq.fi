@@ -68,10 +68,11 @@ describe("dynamicRpcTransport per-request resolution", () => {
     const calls: string[] = [];
 
     const createTransport = () => {
+      const endpoint = currentRpcUrl;
       return [
         custom({
           async request({ method }) {
-            calls.push(`${currentRpcUrl}:${method}`);
+            calls.push(`${endpoint}:${method}`);
             return "0x1";
           },
         }),
@@ -119,5 +120,26 @@ describe("dynamicRpcTransport per-request resolution", () => {
     const result = await client.request({ method: "eth_chainId" });
     expect(result).toBe("0x1");
     expect(calls).toEqual(["primary", "secondary"]);
+  });
+
+  it("provides a valid request function on both transport and config", async () => {
+    const transport = dynamicRpcTransport(() => [
+      custom({
+        async request() {
+          return "0x1";
+        },
+      }),
+    ]);
+    const instance = transport({ chain: mainnet });
+    expect(typeof instance.request).toBe("function");
+    expect(typeof instance.config.request).toBe("function");
+
+    const client = createClient({
+      chain: mainnet,
+      transport,
+    });
+    expect(typeof client.transport.request).toBe("function");
+    const res = await client.transport.request({ method: "eth_chainId" });
+    expect(res).toBe("0x1");
   });
 });
