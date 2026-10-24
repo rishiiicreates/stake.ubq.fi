@@ -72,6 +72,16 @@ describe("rpcHealthCheck", () => {
     expect(result.error).toContain("Timed out");
   });
 
+  it("settles on its deadline when the fetcher ignores the abort signal", async () => {
+    const ignoringAbortFetcher = (() => new Promise<Response>(() => undefined)) as typeof fetch;
+    const startedAt = Date.now();
+    const result = await rpcHealthCheck("https://rpc.example", { timeoutMs: 30, fetcher: ignoringAbortFetcher });
+
+    expect(result.status).toBe("timeout");
+    expect(result.error).toContain("Timed out");
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+  });
+
   it("honors an already-aborted caller signal without fetching", async () => {
     let calls = 0;
     const fetcher = (async () => {
@@ -95,6 +105,31 @@ describe("rpcHealthCheck", () => {
     const result = await pending;
 
     expect(result.status).toBe("aborted");
+  });
+
+  it("times out when response headers resolve immediately but decoding the body hangs", async () => {
+    const headersOnlyHangingBodyFetcher = (async () =>
+      new Response(
+        new ReadableStream({
+          start() {
+            // Never enqueues body chunks and never closes
+          },
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }
+      )) as typeof fetch;
+
+    const startedAt = Date.now();
+    const result = await rpcHealthCheck("https://rpc.example", {
+      timeoutMs: 25,
+      fetcher: headersOnlyHangingBodyFetcher,
+    });
+
+    expect(result.status).toBe("timeout");
+    expect(result.error).toContain("Timed out after 25ms");
+    expect(Date.now() - startedAt).toBeLessThan(500);
   });
 
   it("exposes a short bounded default timeout", () => {

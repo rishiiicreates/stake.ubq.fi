@@ -56,27 +56,53 @@ export async function rpcHealthCheck(rpcUrl: string, options: RpcHealthCheckOpti
     timedOut = true;
     controller.abort();
   }, timeoutMs);
-  const onCallerAbort = () => controller.abort();
+  // A fetcher may ignore the abort signal, so the probe settles on its own deadline
+  // instead of leaving the caller pending forever. The abandoned fetch is not awaited.
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  let rejectAbort: ((reason?: unknown) => void) | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    rejectAbort = reject;
+    deadlineTimer = setTimeout(() => {
+      timedOut = true;
+      reject(new Error(`Timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+  const onCallerAbort = () => {
+    controller.abort();
+    rejectAbort?.(new Error("Health check was aborted"));
+  };
   signal?.addEventListener("abort", onCallerAbort);
 
   try {
-    const response = await fetcher(rpcUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "eth_chainId",
-        params: [],
-      }),
-      signal: controller.signal,
-    });
+    const probeOutcome = await Promise.race([
+      (async (): Promise<{ ok: false; status: number } | { ok: true; payload: RpcResponsePayload }> => {
+        const response = await fetcher(rpcUrl, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "eth_chainId",
+            params: [],
+          }),
+          signal: controller.signal,
+        });
 
-    if (!response.ok) {
-      return { status: "unreachable", rpcUrl, latencyMs: elapsed(), error: `HTTP ${response.status}` };
+        if (!response.ok) {
+          return { ok: false, status: response.status };
+        }
+
+        const payload = (await response.json()) as RpcResponsePayload;
+        return { ok: true, payload };
+      })(),
+      deadline,
+    ]);
+
+    if (!probeOutcome.ok) {
+      return { status: "unreachable", rpcUrl, latencyMs: elapsed(), error: `HTTP ${probeOutcome.status}` };
     }
 
-    const payload = (await response.json()) as RpcResponsePayload;
+    const { payload } = probeOutcome;
     if (payload.error) {
       return { status: "rpc-error", rpcUrl, latencyMs: elapsed(), error: payload.error.message ?? "RPC responded with an error" };
     }
@@ -108,6 +134,7 @@ export async function rpcHealthCheck(rpcUrl: string, options: RpcHealthCheckOpti
     };
   } finally {
     clearTimeout(timer);
+    if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
     signal?.removeEventListener("abort", onCallerAbort);
   }
 }
