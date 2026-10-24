@@ -1,8 +1,9 @@
 import { describe, expect, it } from "bun:test";
+import { createClient, custom } from "viem";
 import { anvil, mainnet } from "viem/chains";
 
 import { MAINNET_RPC_FALLBACK_URL, RPC_FALLBACK_URLS, RPC_URL } from "../src/constants/config";
-import { getChainRpcUrl, getRpcTransportUrls } from "../src/wallet/config";
+import { dynamicRpcTransport, getChainRpcUrl, getRpcTransportUrls } from "../src/wallet/config";
 
 describe("getChainRpcUrl", () => {
   it("appends the chain id to mainnet RPC endpoints", () => {
@@ -58,5 +59,65 @@ describe("getRpcTransportUrls", () => {
     for (const fallbackUrl of RPC_FALLBACK_URLS) {
       expect(urls).toContain(`${fallbackUrl}/1`);
     }
+  });
+});
+
+describe("dynamicRpcTransport per-request resolution", () => {
+  it("switches the selected endpoint after client creation and observes the next request on the new endpoint", async () => {
+    let currentRpcUrl = "https://primary.example";
+    const calls: string[] = [];
+
+    const createTransport = () => {
+      return [
+        custom({
+          async request({ method }) {
+            calls.push(`${currentRpcUrl}:${method}`);
+            return "0x1";
+          },
+        }),
+      ];
+    };
+
+    const client = createClient({
+      chain: mainnet,
+      transport: dynamicRpcTransport(createTransport),
+    });
+
+    await client.request({ method: "eth_chainId" });
+    expect(calls).toEqual(["https://primary.example:eth_chainId"]);
+
+    // Switch selected endpoint after client construction
+    currentRpcUrl = "https://fallback.example";
+
+    await client.request({ method: "eth_chainId" });
+    expect(calls).toEqual([
+      "https://primary.example:eth_chainId",
+      "https://fallback.example:eth_chainId",
+    ]);
+  });
+
+  it("falls back to secondary transport when primary rejects in multi-transport config", async () => {
+    const calls: string[] = [];
+    const primary = custom({
+      async request() {
+        calls.push("primary");
+        throw new Error("Primary failed");
+      },
+    });
+    const secondary = custom({
+      async request() {
+        calls.push("secondary");
+        return "0x1";
+      },
+    });
+
+    const client = createClient({
+      chain: mainnet,
+      transport: dynamicRpcTransport(() => [primary, secondary]),
+    });
+
+    const result = await client.request({ method: "eth_chainId" });
+    expect(result).toBe("0x1");
+    expect(calls).toEqual(["primary", "secondary"]);
   });
 });

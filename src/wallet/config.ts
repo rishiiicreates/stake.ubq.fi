@@ -35,22 +35,51 @@ export function getRpcTransportUrls(
   return [...new Set(rpcUrls.map((currentRpcUrl) => getChainRpcUrl(currentRpcUrl, chain.id, localNode)))];
 }
 
-function createRpcTransport(chain: Chain): Transport {
-  const selectedRpcUrl = getResolvedRpcBaseUrl() || RPC_URL;
-  const rpcTransports = getRpcTransportUrls(chain, { rpcUrl: selectedRpcUrl }).map((rpcUrl) =>
-    http(rpcUrl, {
-      batch: !isLocalNode,
-      timeout: RPC_TRANSPORT_TIMEOUT_MS,
-    })
-  );
+function createRpcTransport(rpcUrl: string): Transport {
+  return http(rpcUrl, {
+    batch: !isLocalNode,
+    timeout: RPC_TRANSPORT_TIMEOUT_MS,
+  });
+}
 
-  if (rpcTransports.length === 1) return rpcTransports[0];
-  return fallback(rpcTransports, { rank: false });
+/**
+ * Resolves the selected RPC endpoint dynamically on each request rather than only
+ * once when the transport factory or client is constructed. Wagmi memoizes the client
+ * per chain, so deferring resolution to the request handler ensures that background
+ * health checks updating the resolved RPC base URL take immediate effect.
+ *
+ * @param createTransport - Callback producing the array of transport factories for the chain.
+ * @returns A viem Transport function with per-request dynamic resolution.
+ */
+export function dynamicRpcTransport(createTransport: () => Transport[]): Transport {
+  return (params) => {
+    return {
+      config: {
+        key: "dynamicRpc",
+        name: "Dynamic RPC",
+        request: undefined as never,
+        retryCount: 3,
+        retryDelay: 150,
+        timeout: RPC_TRANSPORT_TIMEOUT_MS,
+        type: "dynamicRpc",
+      },
+      async request(args) {
+        const transports = createTransport();
+        const [primary, ...rest] = transports;
+        if (!primary) throw new Error("No RPC transport URL is available");
+        const activeTransport = rest.length === 0 ? primary(params) : fallback([primary, ...rest], { rank: false })(params);
+        return activeTransport.request(args);
+      },
+      value: undefined,
+    };
+  };
 }
 
 // Anvil doesn't support URLs like http://localhost:8545/31337
 const transports = supportedChains.reduce<TransportsMap>((acc, chain) => {
-  acc[chain.id] = createRpcTransport(chain);
+  acc[chain.id] = dynamicRpcTransport(() =>
+    getRpcTransportUrls(chain, { rpcUrl: getResolvedRpcBaseUrl() || RPC_URL }).map((rpcUrl) => createRpcTransport(rpcUrl))
+  );
   return acc;
 }, {} as TransportsMap);
 
